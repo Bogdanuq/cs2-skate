@@ -160,9 +160,9 @@ bool StartEngine(const std::string& exe, const std::string& assets, const std::s
     StopEngine(exe);
     char size[32];
     std::snprintf(size, sizeof(size), "%ux%u", w, h);
-    // SKATE_REPORT_CHILD: no crash-report supervisor (its window would pop up over CS2); cs_frame restarts a dead engine
-    std::string sets =
-        std::string("set SKATE_CS2_LINK=") + size + "&& set SKATE3_INPUT=xinput&& set SKATE_REPORT_CHILD=1&& ";
+    // SKATE_REPORT_CHILD: no crash-report supervisor (its window would pop up over CS2); cs_frame restarts a dead engine.
+    // Controllers: the engine's default SDL3 (Xbox, PlayStation, Switch Pro, ...; works with its window hidden)
+    std::string sets = std::string("set SKATE_CS2_LINK=") + size + "&& set SKATE_REPORT_CHILD=1&& ";
     if (online == 1 || online == 2) {
         // cmd-safe: letters, digits, space and - _ . only (no & | ^ % < > " in a set)
         std::string safe;

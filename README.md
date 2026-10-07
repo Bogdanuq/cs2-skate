@@ -8,7 +8,7 @@ you skate and come back when you stop.
 ## ✅ Requirements
 
 - Counter-Strike 2 + **Astral** (Lua scripting)
-- An **Xbox-style controller** (XInput). PlayStation controllers are **not** seen.
+- A **controller**: Xbox, PlayStation (DualSense / DualShock 4), Switch Pro and most others, USB or Bluetooth
 - A GPU with **Vulkan** drivers (any recent NVIDIA/AMD/Intel driver)
 - The [Microsoft Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) (most PCs already
   have it; Steam games install it)
@@ -86,7 +86,7 @@ skater's name. Steam has to be running (it is, with CS2). Changing **Online** re
 
 - **Nothing happens when I tick Skate**: check the Astral console for `[cs2skate]` lines. Make sure
   `skate3rust.exe` is directly inside `astral\lua\cs2skate` and `assets` contains a `private` folder.
-- **Controller does nothing**: use an Xbox-style controller, connect it before ticking Skate, re-tick Skate.
+- **Controller does nothing**: connect it before ticking Skate, then re-tick Skate. PlayStation controller still dead? Turn off Steam Input for CS2 (Steam → CS2 → Properties → Controller → Disable Steam Input).
 - **"no park for &lt;map&gt;"**: parks so far: **de_dust2** and **de_mirage**. Other maps need their own
   `<map>_link.skate` in `astral\lua\cs2skate\maps` (made with `src/maps/cs2_to_skate.py`).
 - **I can still see my CS2 player or HUD**: `sv_cheats 1` **before** ticking Skate, then re-tick it.
