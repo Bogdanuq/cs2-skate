@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCALE = 0.0254
 TILE = 2.0  # metres per texture repeat
 # the first info_player_terrorist (s2v -d maps/<map>/entities/default_ents.vents_c): CS2 origin x y z, yaw
-SPAWNS = {"de_dust2": (-822.365, -795.642, 150.709, 107.0)}
+SPAWNS = {"de_dust2": (-822.365, -795.642, 150.709, 107.0), "de_mirage": (1376.0, -304.0, -144.0, 227.0)}
 
 # a surface prop's look: the first match by substring; (name, tint)
 LOOKS = [("dirt", (0.62, 0.50, 0.36)), ("sand", (0.80, 0.70, 0.52)), ("grass", (0.36, 0.48, 0.24)),

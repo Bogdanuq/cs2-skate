@@ -41,14 +41,15 @@ astral\lua\
    ├─ manifest.json
    ├─ mods\
    ├─ maps\
-   │  └─ de_dust2_link.skate
+   │  ├─ de_dust2_link.skate
+   │  └─ de_mirage_link.skate
    └─ assets\
       └─ private\...
 ```
 
 ## 🎮 How to use
 
-1. Start a **local game on de_dust2** (Practice with bots, or your own server).
+1. Start a **local game on de_dust2 or de_mirage** (Practice with bots, or your own server).
 2. Open the console and type `sv_cheats 1`.
 3. Load `cs2skate.lua` in Astral.
 4. Go to **Scripting → Script elements** and tick **Skate**.
