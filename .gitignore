@@ -1,0 +1,4 @@
+build/
+*.pdb
+*.zip
+__pycache__/

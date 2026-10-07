@@ -1,0 +1,289 @@
+diff --git a/crates/skate-game/src/app.rs b/crates/skate-game/src/app.rs
+index 575e265..4abea13 100644
+--- a/crates/skate-game/src/app.rs
++++ b/crates/skate-game/src/app.rs
+@@ -144,6 +144,7 @@ pub(crate) fn build(
+     app.add_plugins(crate::multiplayer::MultiplayerPlugin);
+     app.add_plugins(crate::scoring_hud::ScoringHudPlugin);
+     app.add_plugins(crate::debug_cam::DebugCamPlugin);
++    app.add_plugins(crate::cs2_link::Cs2LinkPlugin);
+     app.add_plugins(crate::water_splash::WaterSplashPlugin);
+     app.add_plugins(crate::ui_audio::UiAudioPlugin);
+     app.add_plugins(crate::game_audio::GameAudioPlugin);
+diff --git a/crates/skate-game/src/graphics_menu.rs b/crates/skate-game/src/graphics_menu.rs
+index 429b5b7..b8382e9 100644
+--- a/crates/skate-game/src/graphics_menu.rs
++++ b/crates/skate-game/src/graphics_menu.rs
+@@ -222,7 +222,7 @@ fn setup(
+     config: Res<crate::config::Config>,
+     mut images: ResMut<Assets<Image>>,
+     mut window: Single<&mut Window, With<PrimaryWindow>>,
+-    cameras: Query<Entity, With<Camera3d>>,
++    cameras: Query<Entity, (With<Camera3d>, Without<crate::cs2_link::LinkCamera>)>,
+     mut time: ResMut<Time<Virtual>>,
+ ) {
+     let path = config
+diff --git a/crates/skate-game/src/main.rs b/crates/skate-game/src/main.rs
+index f893681..3ee04af 100644
+--- a/crates/skate-game/src/main.rs
++++ b/crates/skate-game/src/main.rs
+@@ -1,4 +1,5 @@
+ mod frame_timing;
++mod cs2_link;
+ mod animation;
+ mod crash_report;
+ mod crash_context;
+diff --git a/crates/skate-game/src/cs2_link.rs b/crates/skate-game/src/cs2_link.rs
+new file mode 100644
+index 0000000..1fba798
+--- /dev/null
++++ b/crates/skate-game/src/cs2_link.rs
+@@ -0,0 +1,248 @@
++//! CS2 link (`SKATE_CS2_LINK=<width>x<height>`): the skater drawn inside Counter-Strike 2 by cs2skate.dll.
++//!
++//! A second camera sits on the gameplay camera's pose every frame and renders into an image with a transparent
++//! clear (CS2 parks have no visible render geometry, so that's the skater, board and effects only). Each frame's
++//! pixels go to shared memory `Local\Skate3CS2Link` with the camera pose they were rendered from; CS2 puts its view
++//! on that pose and draws the pixels over its frame. The window is hidden (`SKATE_CS2_SHOW=1` keeps it).
++//!
++//! Pairing pose and pixels: readbacks complete frames later, one per frame the target was ready, in order. The
++//! render world queues the extracted pose on exactly those frames (the readback plugin's own condition), and each
++//! completion takes the oldest.
++use bevy::{
++    camera::RenderTarget,
++    prelude::*,
++    render::{
++        Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
++        gpu_readback::{Readback, ReadbackComplete},
++        render_asset::RenderAssets,
++        render_resource::{TextureFormat, TextureUsages},
++        texture::GpuImage,
++    },
++    window::PrimaryWindow,
++};
++use std::{
++    collections::VecDeque,
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicU32, Ordering},
++    },
++};
++
++const MAGIC: u32 = 0x4C43_3353; // "S3CL"
++const VERSION: u32 = 1;
++const HEADER: usize = 4096;
++const SLOT_HEAD: usize = 64;
++const SLOTS: usize = 3;
++
++/// Shared memory: header, then three slots of (slot head + width * height RGBA8 sRGB, premultiplied by the
++/// transparent clear). Writer: slot seq odd while writing; `latest` names the newest finished slot.
++#[repr(C)]
++struct Header {
++    magic: u32,
++    version: u32,
++    width: u32,
++    height: u32,
++    latest: AtomicU32,
++    frames: AtomicU32,
++}
++#[repr(C)]
++struct SlotHead {
++    seq: AtomicU32,
++    _pad: u32,
++    frame: u64,
++    /// camera in the park's space (metres, Y up): position, rotation (x y z w), vertical fov (radians), aspect
++    position: [f32; 3],
++    rotation: [f32; 4],
++    fov: f32,
++    aspect: f32,
++    /// the skater's root (feet) when the frame was published, park space
++    root: [f32; 3],
++}
++
++const _: () = assert!(size_of::<SlotHead>() == SLOT_HEAD);
++
++#[derive(Clone, Copy, Default)]
++struct Pose {
++    position: [f32; 3],
++    rotation: [f32; 4],
++    fov: f32,
++    aspect: f32,
++}
++
++#[derive(Component)]
++pub(crate) struct LinkCamera;
++#[derive(Resource, Clone)]
++struct LinkTarget(Handle<Image>);
++#[derive(Resource, Clone, Default)]
++struct Poses(Arc<Mutex<VecDeque<Pose>>>);
++#[derive(Resource, Default)]
++struct ExtractedPose(Option<Pose>, Option<Handle<Image>>);
++
++#[derive(Resource)]
++struct Link {
++    base: *mut u8,
++    width: u32,
++    height: u32,
++    frame: u64,
++    root: [f32; 3],
++}
++// SAFETY: the mapping lives for the process; only the main world's readback observer writes it.
++unsafe impl Send for Link {}
++unsafe impl Sync for Link {}
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn CreateFileMappingW(file: isize, attributes: *const u8, protect: u32, high: u32, low: u32, name: *const u16) -> isize;
++    fn MapViewOfFile(mapping: isize, access: u32, high: u32, low: u32, bytes: usize) -> *mut u8;
++}
++
++fn size_from_env() -> Option<(u32, u32)> {
++    let value = std::env::var("SKATE_CS2_LINK").ok()?;
++    let (w, h) = value.split_once('x')?;
++    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
++    // readback rows are padded to 256 bytes: a width in 64-pixel steps keeps rows packed
++    let w = (w.clamp(64, 4096) + 63) / 64 * 64;
++    Some((w, h.clamp(64, 4096)))
++}
++
++fn map(width: u32, height: u32) -> Option<*mut u8> {
++    let bytes = HEADER + SLOTS * (SLOT_HEAD + width as usize * height as usize * 4);
++    let name: Vec<u16> = "Local\\Skate3CS2Link\0".encode_utf16().collect();
++    // SAFETY: pagefile-backed mapping (INVALID_HANDLE_VALUE), PAGE_READWRITE, FILE_MAP_ALL_ACCESS.
++    unsafe {
++        let handle = CreateFileMappingW(-1, std::ptr::null(), 0x04, (bytes >> 32) as u32, bytes as u32, name.as_ptr());
++        if handle == 0 {
++            return None;
++        }
++        let base = MapViewOfFile(handle, 0xF001F, 0, 0, bytes);
++        if base.is_null() {
++            return None;
++        }
++        let header = &mut *(base as *mut Header);
++        header.width = width;
++        header.height = height;
++        header.version = VERSION;
++        header.latest.store(u32::MAX, Ordering::Release);
++        header.magic = MAGIC;
++        Some(base)
++    }
++}
++
++pub(crate) struct Cs2LinkPlugin;
++impl Plugin for Cs2LinkPlugin {
++    fn build(&self, app: &mut App) {
++        let Some((width, height)) = size_from_env() else { return };
++        let Some(base) = map(width, height) else {
++            warn!("CS2 link: shared memory unavailable");
++            return;
++        };
++        info!("CS2_LINK {width}x{height}");
++        let poses = Poses::default();
++        app.insert_resource(Link { base, width, height, frame: 0, root: [0.; 3] })
++            .insert_resource(poses.clone())
++            .add_systems(Startup, spawn)
++            .add_systems(Update, follow.after(crate::camera::present));
++        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
++        render_app
++            .insert_resource(poses)
++            .init_resource::<ExtractedPose>()
++            .add_systems(ExtractSchedule, extract)
++            .add_systems(Render, queue.in_set(RenderSystems::PrepareResources));
++    }
++}
++
++fn spawn(mut commands: Commands, link: Res<Link>, mut images: ResMut<Assets<Image>>,
++    mut windows: Query<&mut Window, With<PrimaryWindow>>) {
++    let mut image = Image::new_target_texture(link.width, link.height, TextureFormat::Rgba8UnormSrgb, None);
++    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
++    let target = images.add(image);
++    commands.spawn((
++        LinkCamera,
++        Camera3d::default(),
++        Camera { order: -2, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
++        RenderTarget::Image(target.clone().into()),
++        Msaa::Sample4,
++        Transform::default(),
++    ));
++    commands.insert_resource(LinkTarget(target.clone()));
++    commands.spawn(Readback::texture(target)).observe(publish);
++    if std::env::var("SKATE_CS2_SHOW").as_deref() != Ok("1") {
++        for mut window in &mut windows {
++            window.visible = false;
++        }
++    }
++}
++
++/// The link camera on the gameplay camera (pose and fov); the gameplay camera frames for the link's aspect.
++fn follow(mut link: ResMut<Link>, mut runtime: ResMut<crate::camera::CameraRuntime>,
++    history: Res<crate::presentation::Presentation>, time: Res<Time<Fixed>>, replay: Res<crate::replay::Replay>,
++    gameplay: Query<(&Transform, &Projection), (With<crate::camera::GameplayCamera>, Without<LinkCamera>)>,
++    mut cameras: Query<(&mut Transform, &mut Projection), With<LinkCamera>>) {
++    runtime.set_aspect_ratio(link.width as f32 / link.height as f32);
++    if let Some((_, current, _)) = history.view(&replay, time.overstep_fraction()) {
++        link.root = current.root.translation.to_array();
++    }
++    let Ok((source, source_projection)) = gameplay.single() else { return };
++    for (mut transform, mut projection) in &mut cameras {
++        *transform = *source;
++        if let (Projection::Perspective(to), Projection::Perspective(from)) = (&mut *projection, source_projection) {
++            to.fov = from.fov;
++            to.near = from.near;
++        }
++    }
++}
++
++fn extract(mut out: ResMut<ExtractedPose>, target: Extract<Option<Res<LinkTarget>>>,
++    cameras: Extract<Query<(&GlobalTransform, &Projection), With<LinkCamera>>>) {
++    out.1 = target.as_ref().map(|t| t.0.clone());
++    out.0 = cameras.single().ok().map(|(transform, projection)| {
++        let (_, rotation, position) = transform.to_scale_rotation_translation();
++        let (fov, aspect) = match projection {
++            Projection::Perspective(p) => (p.fov, p.aspect_ratio),
++            _ => (1.0, 1.0),
++        };
++        Pose { position: position.to_array(), rotation: rotation.to_array(), fov, aspect }
++    });
++}
++
++/// One pose per readback the plugin requests this frame (it requests when the target's GPU image exists).
++fn queue(pose: Res<ExtractedPose>, poses: Res<Poses>, images: Res<RenderAssets<GpuImage>>) {
++    let (Some(target), Some(pose)) = (&pose.1, pose.0) else { return };
++    if images.get(target).is_some() {
++        let mut queue = poses.0.lock().unwrap();
++        queue.push_back(pose);
++        while queue.len() > 16 {
++            queue.pop_front();
++        }
++    }
++}
++
++fn publish(event: On<ReadbackComplete>, mut link: ResMut<Link>, poses: Res<Poses>) {
++    let Some(pose) = poses.0.lock().unwrap().pop_front() else { return };
++    let (width, height) = (link.width as usize, link.height as usize);
++    let pixels = width * height * 4;
++    let data: &[u8] = &event.data;
++    if data.len() < pixels {
++        return;
++    }
++    link.frame += 1;
++    // SAFETY: the mapping holds HEADER + SLOTS slots of this size (map()).
++    unsafe {
++        let header = &*(link.base as *const Header);
++        let latest = header.latest.load(Ordering::Acquire);
++        let slot = if latest == u32::MAX { 0 } else { (latest as usize + 1) % SLOTS };
++        let at = link.base.add(HEADER + slot * (SLOT_HEAD + pixels));
++        let head = &mut *(at as *mut SlotHead);
++        head.seq.fetch_add(1, Ordering::AcqRel);
++        head.frame = link.frame;
++        head.position = pose.position;
++        head.rotation = pose.rotation;
++        head.fov = pose.fov;
++        head.aspect = pose.aspect;
++        head.root = link.root;
++        std::ptr::copy_nonoverlapping(data.as_ptr(), at.add(SLOT_HEAD), pixels);
++        head.seq.fetch_add(1, Ordering::AcqRel);
++        header.latest.store(slot as u32, Ordering::Release);
++        header.frames.fetch_add(1, Ordering::Relaxed);
++    }
++}
