@@ -72,7 +72,7 @@ astral\lua\
 - **Nothing happens when I tick Skate**: check the Astral console for `[cs2skate]` lines. Make sure
   `skate3rust.exe` is directly inside `astral\lua\cs2skate` and `assets` contains a `private` folder.
 - **Controller does nothing**: use an Xbox-style controller, connect it before ticking Skate, re-tick Skate.
-- **"no park for &lt;map&gt;"**: only **de_dust2** has a park so far. Other maps need their own
+- **"no park for &lt;map&gt;"**: parks so far: **de_dust2** and **de_mirage**. Other maps need their own
   `<map>_link.skate` in `astral\lua\cs2skate\maps` (made with `src/maps/cs2_to_skate.py`).
 - **I can still see my CS2 player or HUD**: `sv_cheats 1` **before** ticking Skate, then re-tick it.
 - **Bots keep shooting my parked player**: `bot_stop 1` (or `bot_kick`).
