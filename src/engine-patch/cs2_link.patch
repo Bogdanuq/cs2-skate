@@ -23,6 +23,20 @@ index 429b5b7..b8382e9 100644
      mut time: ResMut<Time<Virtual>>,
  ) {
      let path = config
+diff --git a/crates/skate-game/src/input.rs b/crates/skate-game/src/input.rs
+index 3c072f7..11910f0 100644
+--- a/crates/skate-game/src/input.rs
++++ b/crates/skate-game/src/input.rs
+@@ -106,7 +106,8 @@ fn start_controllers(config: Res<crate::config::Config>) {
+ pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>) {
+     let previous = input.status;
+     let previous_kinds = input.kinds.clone();
+-    let focused=windows.iter().any(|w|w.focused);
++    // the CS2 link's window is hidden, never focused: its pad input always counts
++    let focused=windows.iter().any(|w|w.focused) || crate::cs2_link::enabled();
+     let active=net.is_some_and(|n|n.active());
+     input.collect(std::array::from_fn(|slot| {
+         if active && ((!focused && config.multiplayer.controller.is_none()) || config.multiplayer.controller.is_some_and(|selected|selected as usize!=slot)) {
 diff --git a/crates/skate-game/src/main.rs b/crates/skate-game/src/main.rs
 index f893681..3ee04af 100644
 --- a/crates/skate-game/src/main.rs
@@ -33,6 +47,25 @@ index f893681..3ee04af 100644
  mod animation;
  mod crash_report;
  mod crash_context;
+diff --git a/crates/skate-game/src/multiplayer/nametags.rs b/crates/skate-game/src/multiplayer/nametags.rs
+index fb0d0a3..da0998d 100644
+--- a/crates/skate-game/src/multiplayer/nametags.rs
++++ b/crates/skate-game/src/multiplayer/nametags.rs
+@@ -12,11 +12,13 @@ pub(super) fn draw(
+     mods: Option<Res<crate::modding::Mods>>,
+     cameras: Query<(&Camera, &Transform), With<crate::camera::GameplayCamera>>,
+     outputs: Query<(Entity, &Camera), With<IsDefaultUiCamera>>,
++    links: Query<(Entity, &Camera), With<crate::cs2_link::LinkCamera>>,
+     actors: Query<(&NetworkActor, &Transform)>,
+     mut tags: Query<(Entity, &NameTag, &mut Text, &mut Node)>,
+ ) {
+     let mut labels = BTreeMap::new();
+-    let output = outputs.single().ok();
++    // for CS2 the tags go on the link's picture (the window is hidden)
++    let output = links.single().ok().or(outputs.single().ok());
+     if net.active() {
+         if let (Ok((camera, pose)), Some((_, output_camera))) = (cameras.single(), output) {
+             if let (Some(view), Some(screen)) = (camera.logical_viewport_size(), output_camera.logical_viewport_size()) {
 diff --git a/crates/skate-game/src/scoring_hud.rs b/crates/skate-game/src/scoring_hud.rs
 index 898d2f5..f6eb165 100644
 --- a/crates/skate-game/src/scoring_hud.rs
@@ -60,10 +93,10 @@ index 898d2f5..f6eb165 100644
      source: serde_json::Value,
 diff --git a/crates/skate-game/src/cs2_link.rs b/crates/skate-game/src/cs2_link.rs
 new file mode 100644
-index 0000000..03eaa44
+index 0000000..ae3bb7c
 --- /dev/null
 +++ b/crates/skate-game/src/cs2_link.rs
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,344 @@
 +//! CS2 link (`SKATE_CS2_LINK=<width>x<height>`): the skater drawn inside Counter-Strike 2 by cs2skate.dll.
 +//!
 +//! A second camera sits on the gameplay camera's pose every frame and renders into an image with a transparent
@@ -74,6 +107,10 @@ index 0000000..03eaa44
 +//! Pairing pose and pixels: readbacks complete frames later, one per frame the target was ready, in order. The
 +//! render world queues the extracted pose on exactly those frames (the readback plugin's own condition), and each
 +//! completion takes the oldest.
++//!
++//! Online (`SKATE_CS2_ONLINE=host|join`, name `SKATE_CS2_NAME`): the engine's own Steam free-skate, started without
++//! its menu (CS2 can't show it). Host opens a lobby on this park; join keeps browsing this park's lobbies and joins the
++//! first with room. The status line and player count go into the header for CS2's console.
 +use bevy::{
 +    camera::RenderTarget,
 +    prelude::*,
@@ -90,8 +127,10 @@ index 0000000..03eaa44
 +    collections::VecDeque,
 +    sync::{
 +        Arc, Mutex,
++        OnceLock,
 +        atomic::{AtomicU32, Ordering},
 +    },
++    time::{Duration, Instant},
 +};
 +
 +const MAGIC: u32 = 0x4C43_3353; // "S3CL"
@@ -110,7 +149,12 @@ index 0000000..03eaa44
 +    height: u32,
 +    latest: AtomicU32,
 +    frames: AtomicU32,
++    /// online: skaters in the lobby (0 = offline); `status_seq` bumps after each new status text (at STATUS)
++    players: AtomicU32,
++    status_seq: AtomicU32,
 +}
++const STATUS: usize = 64;
++const STATUS_BYTES: usize = 256;
 +#[repr(C)]
 +struct SlotHead {
 +    seq: AtomicU32,
@@ -151,6 +195,8 @@ index 0000000..03eaa44
 +    height: u32,
 +    frame: u64,
 +    root: [f32; 3],
++    /// Some(true) host, Some(false) join, None offline
++    online: Option<bool>,
 +}
 +// SAFETY: the mapping lives for the process; only the main world's readback observer writes it.
 +unsafe impl Send for Link {}
@@ -160,6 +206,12 @@ index 0000000..03eaa44
 +unsafe extern "system" {
 +    fn CreateFileMappingW(file: isize, attributes: *const u8, protect: u32, high: u32, low: u32, name: *const u16) -> isize;
 +    fn MapViewOfFile(mapping: isize, access: u32, high: u32, low: u32, bytes: usize) -> *mut u8;
++}
++
++/// The engine runs for CS2 (hidden window: input must not wait for focus).
++pub(crate) fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| size_from_env().is_some())
 +}
 +
 +fn size_from_env() -> Option<(u32, u32)> {
@@ -204,10 +256,15 @@ index 0000000..03eaa44
 +        };
 +        info!("CS2_LINK {width}x{height}");
 +        let poses = Poses::default();
-+        app.insert_resource(Link { base, width, height, frame: 0, root: [0.; 3] })
++        let online = match std::env::var("SKATE_CS2_ONLINE").as_deref() {
++            Ok("host") => Some(true),
++            Ok("join") => Some(false),
++            _ => None,
++        };
++        app.insert_resource(Link { base, width, height, frame: 0, root: [0.; 3], online })
 +            .insert_resource(poses.clone())
 +            .add_systems(Startup, spawn)
-+            .add_systems(Update, (follow.after(crate::camera::present), hud));
++            .add_systems(Update, (follow.after(crate::camera::present), hud, online_session));
 +        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
 +        render_app
 +            .insert_resource(poses)
@@ -251,6 +308,64 @@ index 0000000..03eaa44
 +        Pickable::IGNORE,
 +        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
 +    ));
++}
++
++#[derive(Default)]
++struct Online {
++    started: Option<Instant>,
++    tried: Option<Instant>,
++    named: bool,
++    status: String,
++}
++
++/// Hosts or joins (see the module doc), retrying while not in a lobby, and reports the status to CS2.
++fn online_session(link: Res<Link>, net: Option<ResMut<crate::multiplayer::Multiplayer>>, mut state: Local<Online>) {
++    let (Some(host), Some(mut net)) = (link.online, net) else { return };
++    let now = Instant::now();
++    let started = *state.started.get_or_insert(now);
++    if !state.named {
++        state.named = true;
++        if let Ok(name) = std::env::var("SKATE_CS2_NAME") {
++            if !name.trim().is_empty() {
++                net.set_player_name(name);
++            }
++        }
++    }
++    // a host request or a join takes a few seconds to come back as a lobby: don't stack them
++    let wait = Duration::from_secs(if host { 20 } else { 6 });
++    if !net.active() && now - started > Duration::from_secs(3) && state.tried.is_none_or(|t| now - t > wait) {
++        state.tried = Some(now);
++        if host {
++            net.steam(true);
++        } else if let Some(row) = net.browser_rows.iter().position(|r| r.players < r.capacity) {
++            net.join_row(row);
++            state.tried = Some(now + Duration::from_secs(10));
++        } else {
++            net.browse(0);
++        }
++    }
++    let players = if net.active() { net.player_ids().len() as u32 } else { 0 };
++    let status = if net.active() {
++        format!("{} ({} skater{} here)", if host { "hosting" } else { "joined" }, players, if players == 1 { "" } else { "s" })
++    } else if host {
++        format!("starting a lobby: {}", net.status)
++    } else {
++        format!("looking for a lobby on this map: {}", if net.browser_status.is_empty() { &net.status } else { &net.browser_status })
++    };
++    // SAFETY: the mapping holds HEADER bytes; STATUS..STATUS + STATUS_BYTES is inside it and only written here.
++    let header = unsafe { &*(link.base as *const Header) };
++    header.players.store(players, Ordering::Release);
++    if status != state.status {
++        let bytes = status.as_bytes();
++        let n = bytes.len().min(STATUS_BYTES - 1);
++        unsafe {
++            std::ptr::copy_nonoverlapping(bytes.as_ptr(), link.base.add(STATUS), n);
++            *link.base.add(STATUS + n) = 0;
++        }
++        header.status_seq.fetch_add(1, Ordering::Release);
++        info!("CS2_LINK online: {status}");
++        state.status = status;
++    }
 +}
 +
 +/// The link camera on the gameplay camera (pose and fov); the gameplay camera frames for the link's aspect.

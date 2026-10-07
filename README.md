@@ -58,6 +58,18 @@ astral\lua\
 
 **Skater resolution**: *Half* (lighter, default) or *Full* (sharper skater, more GPU).
 
+## 🌐 Online (skate with friends)
+
+Up to **10 skaters** through Steam, on the same map. You don't need to be in the same CS2 server: everyone stays in
+their own local game.
+
+1. Everyone loads the **same map** (dust2 or mirage) with `sv_cheats 1`.
+2. One person sets **Online → Host**, everyone else **Online → Join**, then ticks **Skate**.
+3. The Astral console says `[cs2skate] online: hosting (N skaters here)` / `joined (N skaters here)`.
+
+Joiners keep looking until a lobby on that map shows up, so the order doesn't matter much. Your CS2 name is your
+skater's name. Steam has to be running (it is, with CS2). Changing **Online** restarts the skate engine.
+
 ## 🕹️ Controls
 
 | Button | Action |

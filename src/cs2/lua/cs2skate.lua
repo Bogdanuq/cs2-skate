@@ -183,6 +183,8 @@ pcall(ffi.cdef, [[
         int32_t enabled, in_game;
         char map[64];
         int32_t full_res;
+        int32_t online;
+        char name[32];
     } cs2skate_in_t;
     typedef struct {
         int32_t active;
@@ -226,6 +228,9 @@ ui_on:add_tooltip("Skate 3 in CS2: your controller skates (the engine runs hidde
     .. "sv_cheats 1). The map needs a park: astral\\lua\\cs2skate\\maps\\<map>_link.skate.")
 local ui_res = box:add_dropdown("Skater resolution", {"Half", "Full"})
 ui_res:add_tooltip("The skater drawn at half CS2's resolution (lighter: both games share your GPU) or full.")
+local ui_online = box:add_dropdown("Online", {"Off", "Host", "Join"})
+ui_online:add_tooltip("Skate with others (Steam, up to 10, same map): one hosts, the rest join. You don't need to "
+    .. "be in the same CS2 server. Changing this restarts the skate engine.")
 
 -- ── each frame ───────────────────────────────────────────────────────────────────────────────────────────
 local active, hidden = false, false
@@ -247,6 +252,10 @@ callbacks.add("view", function(v)
     fin.in_game = (lp ~= nil and ok_map and type(map) == "string" and #map > 0) and 1 or 0
     ffi.copy(fin.map, fin.in_game == 1 and map:sub(1, 63) or "")
     fin.full_res = ui_res:get() == "Full" and 1 or 0
+    local online = ui_online:get()
+    fin.online = online == "Host" and 1 or online == "Join" and 2 or 0
+    local ok_name, name = pcall(function() return lp and lp:get_name() end)
+    ffi.copy(fin.name, (ok_name and type(name) == "string" and name or ""):sub(1, 31))
     api.frame(fin, fout)
     messages()
     active = fout.active == 1

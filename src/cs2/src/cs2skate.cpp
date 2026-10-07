@@ -19,6 +19,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -34,7 +35,9 @@ constexpr float kPi = 3.14159265f;
 struct Header {
     uint32_t magic, version, width, height;
     std::atomic<uint32_t> latest, frames;
+    std::atomic<uint32_t> players, status_seq;  // online: skaters in the lobby; bumped after each status text
 };
+constexpr size_t kStatus = 64, kStatusBytes = 256;  // the online status text, in the header
 struct SlotHead {
     std::atomic<uint32_t> seq;
     uint32_t pad;
@@ -75,19 +78,22 @@ std::wstring Wide(const std::string& s) {
 
 // every running copy of our engine exe (it re-launches itself as a child), matched by full path so the user's own
 // skate3rust.exe from the release folder is never touched
-std::vector<DWORD> EnginePids(const std::string& exe) {
+std::vector<DWORD> EnginePids(const std::string& exe, bool relay = false) {
     std::vector<DWORD> out;
     const std::wstring want = Wide(exe);
+    const std::wstring relayExe = Wide(exe.substr(0, exe.find_last_of("\\/")) + "\\steam-relay\\skate-steam-relay.exe");
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return out;
     PROCESSENTRY32W e{sizeof(e)};
     for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e)) {
-        if (_wcsicmp(e.szExeFile, L"skate3rust.exe")) continue;
+        const bool isRelay = relay && !_wcsicmp(e.szExeFile, L"skate-steam-relay.exe");
+        if (_wcsicmp(e.szExeFile, L"skate3rust.exe") && !isRelay) continue;
         HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, e.th32ProcessID);
         if (!p) continue;
         wchar_t path[MAX_PATH];
         DWORD n = MAX_PATH;
-        if (QueryFullProcessImageNameW(p, 0, path, &n) && !_wcsicmp(path, want.c_str())) out.push_back(e.th32ProcessID);
+        if (QueryFullProcessImageNameW(p, 0, path, &n) && !_wcsicmp(path, (isRelay ? relayExe : want).c_str()))
+            out.push_back(e.th32ProcessID);
         CloseHandle(p);
     }
     CloseHandle(snap);
@@ -97,7 +103,7 @@ std::vector<DWORD> EnginePids(const std::string& exe) {
 void StopEngine(const std::string& exe) {
     if (g_base) UnmapViewOfFile(g_base), g_base = nullptr;
     if (g_mapping) CloseHandle(g_mapping), g_mapping = nullptr;
-    for (DWORD pid : EnginePids(exe))
+    for (DWORD pid : EnginePids(exe, true))  // its Steam relay too: leaves the lobby now, not in 15 s
         if (HANDLE p = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) TerminateProcess(p, 0), CloseHandle(p);
     g_started = false;
 }
@@ -148,18 +154,29 @@ bool ExplorerExecute(const std::wstring& file, const std::wstring& args, const s
     return ok;
 }
 
-bool StartEngine(const std::string& exe, const std::string& assets, const std::string& map, uint32_t w, uint32_t h) {
+// online: 0 off, 1 host, 2 join; name: the skater's name for the lobby (CS2's player name)
+bool StartEngine(const std::string& exe, const std::string& assets, const std::string& map, uint32_t w, uint32_t h,
+                 int online, const char* name) {
     StopEngine(exe);
     char size[32];
     std::snprintf(size, sizeof(size), "%ux%u", w, h);
+    std::string sets = std::string("set SKATE_CS2_LINK=") + size + "&& set SKATE3_INPUT=xinput&& ";
+    if (online == 1 || online == 2) {
+        // cmd-safe: letters, digits, space and - _ . only (no & | ^ % < > " in a set)
+        std::string safe;
+        for (const char* c = name; *c && safe.size() < 16; ++c)
+            if (std::isalnum(static_cast<unsigned char>(*c)) || std::strchr(" -_.", *c)) safe += *c;
+        while (!safe.empty() && safe.back() == ' ') safe.pop_back();
+        sets += std::string("set SKATE_CS2_ONLINE=") + (online == 1 ? "host" : "join") + "&& ";
+        if (!safe.empty()) sets += "set SKATE_CS2_NAME=" + safe + "&& ";
+    }
     // Explorer's cmd sets the link's switches, then starts the engine (/s: cmd drops only the outer quotes)
-    const std::string cmd = std::string("/s /c \"set SKATE_CS2_LINK=") + size + "&& set SKATE3_INPUT=xinput&& \"" +
-                            exe + "\" --assets \"" + assets + "\" --map \"" + map + "\"\"";
+    const std::string cmd = "/s /c \"" + sets + "\"" + exe + "\" --assets \"" + assets + "\" --map \"" + map + "\"\"";
     const std::string dir = exe.substr(0, exe.find_last_of("\\/"));
     if (!ExplorerExecute(L"cmd.exe", Wide(cmd), Wide(dir)))
         return Say("could not start the skate engine through Explorer (%s)", exe.c_str()), false;
     g_started = true;
-    Say("skate engine started (%s, %s)", size, map.c_str());
+    Say("skate engine started (%s, %s%s)", size, map.c_str(), online == 1 ? ", hosting online" : online == 2 ? ", joining online" : "");
     return true;
 }
 
@@ -448,6 +465,8 @@ bool HookPresent() {
 // ---------------------------------------------------------------- state between frames
 std::string g_exe, g_assets, g_maps;
 std::string g_runningMap;
+int g_runningOnline = 0;
+uint32_t g_statusSeen = 0;
 uint64_t g_latchedAt = ~0ull;
 double g_startedAt = 0;
 }  // namespace
@@ -457,7 +476,9 @@ struct cs_in {
     double time;
     int32_t enabled, in_game;
     char map[64];
-    int32_t full_res;  // 1: the skater at CS2's resolution, 0: half
+    int32_t full_res;
+    int32_t online;  // 0 off, 1 host, 2 join
+    char name[32];   // your CS2 name (the skater's name online)  // 1: the skater at CS2's resolution, 0: half
 };
 struct cs_out {
     int32_t active;     // CS2's view is the skate camera this frame
@@ -485,8 +506,9 @@ __declspec(dllexport) void cs_frame(const cs_in* in, cs_out* out) {
     // (re)start the engine on this map's park, at the size of CS2's frame
     const uint32_t bw = g_bbW.load(), bh = g_bbH.load();
     if (!bw || !bh) return;
-    if (g_runningMap != in->map || !EngineRunning(g_exe)) {
-        if (!g_runningMap.empty() && g_runningMap == in->map && in->time - g_startedAt < 5) return;  // (just failed)
+    if (g_runningMap != in->map || in->online != g_runningOnline || !EngineRunning(g_exe)) {
+        if (!g_runningMap.empty() && g_runningMap == in->map && in->online == g_runningOnline && in->time - g_startedAt < 5)
+            return;  // (just failed)
         const std::string park = g_maps + "\\" + in->map + "_link.skate";
         if (GetFileAttributesA(park.c_str()) == INVALID_FILE_ATTRIBUTES) {
             if (g_runningMap != in->map) Say("no park for %s (%s): convert it first", in->map, park.c_str());
@@ -495,12 +517,19 @@ __declspec(dllexport) void cs_frame(const cs_in* in, cs_out* out) {
         }
         const uint32_t scale = in->full_res ? 1 : 2;
         const uint32_t w = (bw / scale + 32) / 64 * 64, h = uint32_t(double(w) * bh / bw + 0.5);
-        StartEngine(g_exe, g_assets, park, w, h);
-        g_runningMap = in->map, g_startedAt = in->time;
+        StartEngine(g_exe, g_assets, park, w, h, in->online, in->name);
+        g_runningMap = in->map, g_runningOnline = in->online, g_startedAt = in->time, g_statusSeen = 0;
         return;
     }
     const Header* hd = Link();
     if (!hd) return;
+    // the engine's online status line, when it changes
+    if (const uint32_t seq = hd->status_seq.load(std::memory_order_acquire); seq != g_statusSeen) {
+        char text[kStatusBytes];
+        std::memcpy(text, reinterpret_cast<const char*>(hd) + kStatus, kStatusBytes);
+        text[kStatusBytes - 1] = 0;
+        if (hd->status_seq.load(std::memory_order_acquire) == seq) g_statusSeen = seq, Say("online: %s", text);
+    }
     // one frame from the engine per CS2 frame: the first view call after a Present takes the newest
     if (g_presents.load() != g_latchedAt) Latch(hd), g_latchedAt = g_presents.load();
     std::lock_guard lock(g_frameLock);
