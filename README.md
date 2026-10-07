@@ -76,7 +76,7 @@ astral\lua\
 
 - Local games only (needs `sv_cheats 1`).
 - The skater is drawn on top of everything, including walls in front of it.
-- The engine's own menus (pause, trick score) aren't shown in CS2.
+- The engine's own menus (pause) aren't shown in CS2; the trick score is.
 
 ## 🧰 Source (`src/`)
 

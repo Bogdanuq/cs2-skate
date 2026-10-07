@@ -33,12 +33,37 @@ index f893681..3ee04af 100644
  mod animation;
  mod crash_report;
  mod crash_context;
+diff --git a/crates/skate-game/src/scoring_hud.rs b/crates/skate-game/src/scoring_hud.rs
+index 898d2f5..f6eb165 100644
+--- a/crates/skate-game/src/scoring_hud.rs
++++ b/crates/skate-game/src/scoring_hud.rs
+@@ -39,7 +39,7 @@ impl Material2d for HudMaterial {
+ /// The offscreen target already contains RGB multiplied by coverage. Applying
+ /// ImageNode's straight-alpha blend again suppresses the original soft glow.
+ #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+-struct HudComposite {
++pub(crate) struct HudComposite {
+     #[texture(0)]
+     #[sampler(1)]
+     image: Handle<Image>,
+@@ -62,9 +62,9 @@ struct Slot {
+     material: Handle<HudMaterial>,
+ }
+ #[derive(Resource)]
+-struct Hud {
++pub(crate) struct Hud {
+     target: Handle<Image>,
+-    composite: Handle<HudComposite>,
++    pub(crate) composite: Handle<HudComposite>,
+     rebind_after_resize: bool,
+     runtime: hud_runtime::Runtime,
+     source: serde_json::Value,
 diff --git a/crates/skate-game/src/cs2_link.rs b/crates/skate-game/src/cs2_link.rs
 new file mode 100644
-index 0000000..1fba798
+index 0000000..03eaa44
 --- /dev/null
 +++ b/crates/skate-game/src/cs2_link.rs
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,262 @@
 +//! CS2 link (`SKATE_CS2_LINK=<width>x<height>`): the skater drawn inside Counter-Strike 2 by cs2skate.dll.
 +//!
 +//! A second camera sits on the gameplay camera's pose every frame and renders into an image with a transparent
@@ -182,7 +207,7 @@ index 0000000..1fba798
 +        app.insert_resource(Link { base, width, height, frame: 0, root: [0.; 3] })
 +            .insert_resource(poses.clone())
 +            .add_systems(Startup, spawn)
-+            .add_systems(Update, follow.after(crate::camera::present));
++            .add_systems(Update, (follow.after(crate::camera::present), hud));
 +        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
 +        render_app
 +            .insert_resource(poses)
@@ -212,6 +237,20 @@ index 0000000..1fba798
 +            window.visible = false;
 +        }
 +    }
++}
++
++/// The original scoring HUD (trick names, score) over the link's picture too: once the HUD is loaded, its composite
++/// (premultiplied, so the link's transparent background stays premultiplied) also targets the link camera.
++fn hud(mut commands: Commands, hud: Option<Res<crate::scoring_hud::Hud>>, cameras: Query<Entity, With<LinkCamera>>,
++    mut done: Local<bool>) {
++    let (false, Some(hud), Ok(camera)) = (*done, hud, cameras.single()) else { return };
++    *done = true;
++    commands.spawn((
++        MaterialNode(hud.composite.clone()),
++        UiTargetCamera(camera),
++        Pickable::IGNORE,
++        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
++    ));
 +}
 +
 +/// The link camera on the gameplay camera (pose and fov); the gameplay camera frames for the link's aspect.
