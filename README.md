@@ -22,7 +22,9 @@ in the background when you tick Skate.
 1. Download every zip from the [latest release](../../releases/latest):
    - `cs2skate-astral.zip`: the script, its DLL, the engine and the parks
    - `cs2skate-assets-part1.zip`, `cs2skate-assets-part2.zip`, ...: the Skate 3 files
-2. Extract **all of them** into your Astral lua folder (say yes to merging folders):
+2. Extract **all of them** into your Astral lua folder (say yes to merging folders).
+   ⚠️ Don't use Windows' *Extract All*: it puts each zip in its own new folder. Open each zip and drag its
+   contents (`cs2skate` folder, and the `.dll` / `.lua`) into `astral\lua`:
    ```
    ...\steamapps\common\Counter-Strike Global Offensive\astral\lua
    ```

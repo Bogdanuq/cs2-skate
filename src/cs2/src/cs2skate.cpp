@@ -495,6 +495,15 @@ struct cs_out {
 __declspec(dllexport) int cs_init(const char* exe, const char* assets, const char* maps) {
     g_exe = exe, g_assets = assets, g_maps = maps;
     g_stopping = false;
+    // a wrong install (zips extracted into their own folders) otherwise just restarts a dying engine forever
+    const std::string need[][2] = {{g_exe, "the engine (cs2skate-astral.zip)"},
+                                   {g_assets + "\\private", "the Skate 3 assets (cs2skate-assets-part1..3.zip)"},
+                                   {g_maps, "the parks (cs2skate-astral.zip)"}};
+    for (const auto& [path, what] : need)
+        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return Say("missing %s: %s not found. Extract every zip INTO astral\\lua (merge the cs2skate folders)",
+                       what.c_str(), path.c_str()),
+                   0;
     if (!HookPresent()) return Say("Present could not be hooked"), 0;
     return 1;
 }
