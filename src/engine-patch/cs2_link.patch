@@ -11,7 +11,7 @@ index 575e265..4abea13 100644
      app.add_plugins(crate::ui_audio::UiAudioPlugin);
      app.add_plugins(crate::game_audio::GameAudioPlugin);
 diff --git a/crates/skate-game/src/graphics_menu.rs b/crates/skate-game/src/graphics_menu.rs
-index 429b5b7..b8382e9 100644
+index 429b5b7..868d77b 100644
 --- a/crates/skate-game/src/graphics_menu.rs
 +++ b/crates/skate-game/src/graphics_menu.rs
 @@ -222,7 +222,7 @@ fn setup(
@@ -23,6 +23,20 @@ index 429b5b7..b8382e9 100644
      mut time: ResMut<Time<Virtual>>,
  ) {
      let path = config
+@@ -982,8 +982,11 @@ fn pace(menu: Option<Res<Menu>>, mut pacer: ResMut<FramePacer>) {
+     let Some(menu) = menu else {
+         return;
+     };
+-    if menu.settings.fps > 0 {
+-        let period = Duration::from_secs_f64(1. / f64::from(menu.settings.fps));
++    // for CS2 the hidden engine shares the GPU with CS2, which takes one engine frame per frame it draws: no use
++    // rendering more than a fast monitor shows (uncapped, the GPU driver dropped the engine's device in game)
++    let fps = if crate::cs2_link::enabled() { 144 } else { menu.settings.fps };
++    if fps > 0 {
++        let period = Duration::from_secs_f64(1. / f64::from(fps));
+         if let Some(wait) = period.checked_sub(pacer.0.elapsed()) {
+             std::thread::sleep(wait);
+         }
 diff --git a/crates/skate-game/src/input.rs b/crates/skate-game/src/input.rs
 index 3c072f7..11910f0 100644
 --- a/crates/skate-game/src/input.rs

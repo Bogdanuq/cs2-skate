@@ -160,7 +160,9 @@ bool StartEngine(const std::string& exe, const std::string& assets, const std::s
     StopEngine(exe);
     char size[32];
     std::snprintf(size, sizeof(size), "%ux%u", w, h);
-    std::string sets = std::string("set SKATE_CS2_LINK=") + size + "&& set SKATE3_INPUT=xinput&& ";
+    // SKATE_REPORT_CHILD: no crash-report supervisor (its window would pop up over CS2); cs_frame restarts a dead engine
+    std::string sets =
+        std::string("set SKATE_CS2_LINK=") + size + "&& set SKATE3_INPUT=xinput&& set SKATE_REPORT_CHILD=1&& ";
     if (online == 1 || online == 2) {
         // cmd-safe: letters, digits, space and - _ . only (no & | ^ % < > " in a set)
         std::string safe;
@@ -171,8 +173,10 @@ bool StartEngine(const std::string& exe, const std::string& assets, const std::s
         if (!safe.empty()) sets += "set SKATE_CS2_NAME=" + safe + "&& ";
     }
     // Explorer's cmd sets the link's switches, then starts the engine (/s: cmd drops only the outer quotes)
-    const std::string cmd = "/s /c \"" + sets + "\"" + exe + "\" --assets \"" + assets + "\" --map \"" + map + "\"\"";
     const std::string dir = exe.substr(0, exe.find_last_of("\\/"));
+    // the engine's log next to it (engine.log), for crash reports
+    const std::string cmd = "/s /c \"" + sets + "\"" + exe + "\" --assets \"" + assets + "\" --map \"" + map +
+                            "\" > \"" + dir + "\\engine.log\" 2>&1\"";
     if (!ExplorerExecute(L"cmd.exe", Wide(cmd), Wide(dir)))
         return Say("could not start the skate engine through Explorer (%s)", exe.c_str()), false;
     g_started = true;
@@ -506,7 +510,10 @@ __declspec(dllexport) void cs_frame(const cs_in* in, cs_out* out) {
     // (re)start the engine on this map's park, at the size of CS2's frame
     const uint32_t bw = g_bbW.load(), bh = g_bbH.load();
     if (!bw || !bh) return;
-    if (g_runningMap != in->map || in->online != g_runningOnline || !EngineRunning(g_exe)) {
+    const bool running = EngineRunning(g_exe);
+    if (g_runningMap != in->map || in->online != g_runningOnline || !running) {
+        if (!running && g_started && g_runningMap == in->map && in->time - g_startedAt > 5)
+            Say("the skate engine stopped (crash? see cs2skate\\engine.log): restarting it"), g_started = false;
         if (!g_runningMap.empty() && g_runningMap == in->map && in->online == g_runningOnline && in->time - g_startedAt < 5)
             return;  // (just failed)
         const std::string park = g_maps + "\\" + in->map + "_link.skate";
