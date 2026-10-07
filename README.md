@@ -40,6 +40,7 @@ astral\lua\
    ├─ std-....dll
    ├─ manifest.json
    ├─ mods\
+   ├─ steam-relay        (online)
    ├─ maps\
    │  ├─ de_dust2_link.skate
    │  └─ de_mirage_link.skate
