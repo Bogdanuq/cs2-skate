@@ -9,6 +9,12 @@ you skate and come back when you stop.
 
 - Counter-Strike 2 + **Astral** (Lua scripting)
 - An **Xbox-style controller** (XInput). PlayStation controllers are **not** seen.
+- A GPU with **Vulkan** drivers (any recent NVIDIA/AMD/Intel driver)
+- The [Microsoft Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) (most PCs already
+  have it; Steam games install it)
+
+The engine comes **already built** in `cs2skate-astral.zip`: nothing to compile. The CS2 script starts it by itself
+in the background when you tick Skate.
 - About **5 GB** of free disk space
 
 ## 📥 Install
